@@ -6,6 +6,8 @@ Usage:
   python run_study.py --trials 50 --jobs 4 # quick run
   python run_study.py --rot-ratio 0        # translation-only sway (v1 behaviour)
   python run_study.py --two-point-touch    # no end-face search, seam position from the drawing (v1)
+  python run_study.py --conds H2 --fine "" --comp-latency 5   # H2 only, 5 ms estimator latency
+  python run_study.py --sway-freq 0.3,0.8  # low-frequency sway band
 Outputs (results/):
   trials.csv      one row per simulated weld
   summary.csv     success rate per condition / sway / tolerance
@@ -92,15 +94,17 @@ def plots(summary, rows, thr, tols, outdir):
     style = {"R": ("고정형 로봇 (기준)", "#6b7280", "s"), "H0": ("휴머노이드 · 보정 없음", "#dc2626", "x"),
              "H1": ("휴머노이드 · 출발 전 터치 보정", "#2563eb", "o"),
              "H2": ("휴머노이드 · 터치 보정 + 실시간 몸통 보상", "#16a34a", "^")}
-    sways = sorted({s["sway_mm"] for s in summary if s["cond"] != "R"})
+    r_rows = [s for s in summary if s["cond"] == "R"]
 
     fig, axes = plt.subplots(1, len(tols), figsize=(4.2 * len(tols), 3.6), sharey=True)
     for ax, tol in zip(np.atleast_1d(axes), tols):
-        for c in ["H0", "H1", "H2"]:
-            ys = [next(s for s in summary if s["cond"] == c and s["sway_mm"] == sw)[f"success_{tol}mm_pct"] for sw in sways]
-            ax.plot(sways, ys, marker=style[c][2], color=style[c][1], label=style[c][0])
-        rr = next(s for s in summary if s["cond"] == "R")[f"success_{tol}mm_pct"]
-        ax.axhline(rr, color=style["R"][1], ls="--", lw=1, label=style["R"][0])
+        for c in ["H0", "H1", "H2"]:                  # only the conditions that were run (--conds)
+            sel = sorted((s for s in summary if s["cond"] == c), key=lambda s: s["sway_mm"])
+            if sel:
+                ax.plot([s["sway_mm"] for s in sel], [s[f"success_{tol}mm_pct"] for s in sel],
+                        marker=style[c][2], color=style[c][1], label=style[c][0])
+        if r_rows:
+            ax.axhline(r_rows[0][f"success_{tol}mm_pct"], color=style["R"][1], ls="--", lw=1, label=style["R"][0])
         ax.set_title(f"허용 오차 {tol} mm")
         ax.set_xlabel("몸통 흔들림 최대 변위 (mm)")
         ax.grid(alpha=0.3)
@@ -111,22 +115,25 @@ def plots(summary, rows, thr, tols, outdir):
     fig.tight_layout(rect=(0, 0.08, 1, 1))
     fig.savefig(os.path.join(outdir, "fig1_success_vs_sway.png"), dpi=200)
 
-    fig, ax = plt.subplots(figsize=(5, 3.6))
-    for c in ["H0", "H1"]:
-        sel = [r for r in rows if r["cond"] == c and r["sway_mm"] == 0]
-        ax.scatter([r["stance_err_mm"] for r in sel], [r["max_mm"] for r in sel], s=8,
-                   color=style[c][1], label=style[c][0], alpha=0.7)
-    ax.axhline(1.0, color="k", lw=0.8, ls=":")
-    ax.set_yscale("log")
-    # plain decimals (0.1, 1, 10) instead of 10^-1: Korean fonts have no U+2212 for mathtext
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
-    ax.set_xlabel("서는 위치 오차 (mm)")
-    ax.set_ylabel("용접선 최대 이탈 (mm, 로그)")
-    ax.set_title("서는 위치 오차의 영향 (흔들림 0 mm)")
-    ax.legend(fontsize=7)
-    ax.grid(alpha=0.3, which="both")
-    fig.tight_layout()
-    fig.savefig(os.path.join(outdir, "fig2_stance_error.png"), dpi=200)
+    fig2_conds = [c for c in ["H0", "H1"] if any(r["cond"] == c and r["sway_mm"] == 0 for r in rows)]
+    if fig2_conds:
+        fig, ax = plt.subplots(figsize=(5, 3.6))
+        for c in fig2_conds:
+            sel = [r for r in rows if r["cond"] == c and r["sway_mm"] == 0]
+            ax.scatter([r["stance_err_mm"] for r in sel], [r["max_mm"] for r in sel], s=8,
+                       color=style[c][1], label=style[c][0], alpha=0.7)
+        ax.axhline(1.0, color="k", lw=0.8, ls=":")
+        ax.set_yscale("log")
+        # plain decimals (0.1, 1, 10) instead of 10^-1: Korean fonts have no U+2212 for mathtext
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+        ax.set_xlabel("서는 위치 오차 (mm)")
+        ax.set_ylabel("용접선 최대 이탈 (mm, 로그)")
+        ax.set_title("서는 위치 오차의 영향 (흔들림 0 mm)")
+        ax.legend(fontsize=7)
+        ax.grid(alpha=0.3, which="both")
+        fig.tight_layout()
+        fig.savefig(os.path.join(outdir, "fig2_stance_error.png"), dpi=200)
+    plt.close("all")
 
     if thr:
         fig, ax = plt.subplots(figsize=(5, 3.6))
@@ -154,6 +161,11 @@ def main():
                     help="peak base rotation per mm of peak translation (rad/mm); default from TOP Table IV, 0 = translation only")
     ap.add_argument("--two-point-touch", action="store_true",
                     help="skip the end-face search; position along the seam taken from the drawing")
+    ap.add_argument("--conds", default="R,H0,H1,H2", help="conditions for the main study, e.g. H1,H2")
+    ap.add_argument("--comp-latency", type=float, default=None,
+                    help="H2 body-state estimation latency in ms (default 20)")
+    ap.add_argument("--sway-freq", default=None,
+                    help="sway frequency band 'lo,hi' in Hz (default 0.3,2.0)")
     ap.add_argument("--fine-trials", type=int, default=200)
     ap.add_argument("--seed", type=int, default=2026)
     ap.add_argument("--jobs", type=int, default=os.cpu_count())
@@ -168,8 +180,14 @@ def main():
         params_kw["sway_rot_ratio"] = a.rot_ratio
     if a.two_point_touch:
         params_kw["touch_end"] = False
+    if a.comp_latency is not None:
+        params_kw["comp_latency"] = a.comp_latency / 1000.0
+    if a.sway_freq:
+        params_kw["sway_freq"] = tuple(float(f) for f in a.sway_freq.split(","))
+    conds = [c.strip() for c in a.conds.split(",") if c.strip()]
     P = Params(**params_kw)
-    print(f"sway_rot_ratio={P.sway_rot_ratio:.4f} rad/mm, touch_end={P.touch_end}, "
+    print(f"conds={conds}, sway_freq={P.sway_freq} Hz, comp_latency={P.comp_latency * 1000:g} ms, "
+          f"sway_rot_ratio={P.sway_rot_ratio:.4f} rad/mm, touch_end={P.touch_end}, "
           f"touch_approach={P.touch_approach * 1000:.0f} mm, comp noise {P.comp_noise * 1000:.2f} mm / "
           f"{P.comp_noise_rot * 1000:.2f} mrad low-passed at {P.comp_noise_cutoff:g} Hz")
     if a.plot_only:
@@ -187,9 +205,10 @@ def main():
     with open(os.path.join(a.out, "params.txt"), "w") as f:
         for k, v in vars(P).items():
             f.write(f"{k} = {v}\n")
-    jobs = [("R", 0.0, i, a.seed) for i in range(a.trials)]
+    jobs = [("R", 0.0, i, a.seed) for i in range(a.trials)] if "R" in conds else []
     for c in ["H0", "H1", "H2"]:
-        jobs += [(c, s, i, a.seed) for s in sways for i in range(a.trials)]
+        if c in conds:
+            jobs += [(c, s, i, a.seed) for s in sways for i in range(a.trials)]
     print(f"main study: {len(jobs)} welds")
     rows = run_jobs(jobs, a.jobs, params_kw)
     write_csv(os.path.join(a.out, "trials.csv"), rows)

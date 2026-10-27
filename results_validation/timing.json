@@ -1,0 +1,17 @@
+{
+ "latency/lat_5ms": 30.5,
+ "latency/lat_10ms": 30.8,
+ "latency/lat_20ms": 30.4,
+ "latency/lat_2ms": 30.8,
+ "latency/lat_1ms": 31.1,
+ "latency/lat_0ms": 31.1,
+ "latency/lat_15ms": 30.9,
+ "rot_ratio/rot_0": 94.4,
+ "rot_ratio/rot_0.0007": 97.3,
+ "rot_ratio/rot_0.003": 92.1,
+ "rot_ratio/rot_0.0089": 92.9,
+ "frequency/low_0.3-0.8Hz": 59.7,
+ "frequency/base_0.3-2.0Hz": 60.9,
+ "frequency/high_1.0-2.0Hz": 59.0,
+ "stats/seed2027": 110.4
+}

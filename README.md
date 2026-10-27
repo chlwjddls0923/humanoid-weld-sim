@@ -107,6 +107,18 @@ python make_video.py                  # 데모 영상 (약 45초)
 - HD현대삼호 협동로봇 용접 사례(Rainbow Robotics) — 터치 센싱 + 아크 센싱 보정.
 - KOBELCO, Robotic Welding System for Shipbuilding (2018) — 3D CAD에서 용접선 자동 추출.
 
+## 검증 실험
+
+v2 결과의 가정 민감도와 통계 신뢰도를 `results_validation/`에서 확인했다. 정리는 `results_validation/VALIDATION.md`에 있다.
+
+```bash
+python run_validation.py     # H2 지연 스윕, 회전 비율, 흔들림 주파수, seed 2027 재실행 + 표 (10코어 약 15분)
+python validate_top.py       # TOP Table IV 몸통 오차 → G1 토치 변위 (model_check.txt)
+```
+
+요약: H1(현재 기술)이 실기 수준 흔들림에서 실패한다는 결론은 모든 가정에서 유지되지만, 한계값은 회전 비율에 따라 0.1~0.6 mm(허용 1.0 mm)다.
+H2는 흔들림 1.5 mm·허용 1.5 mm에서 추정 지연 15 ms 이하가 필요하다. 이 값은 흔들림 주파수와 회전 비율 가정에 좌우된다.
+
 ## 이 결과를 만든 환경
 
 macOS(Apple Silicon, Python 3.14, `pip install mujoco` → MuJoCo 3.17.0, numpy 2.5)에서 10코어로 계산했습니다.
