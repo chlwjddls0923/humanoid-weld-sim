@@ -5,8 +5,10 @@
   angle/   2. torch-axis angle error on the v2 main conditions (R, H0, H1, H2 x 0/0.5/1/1.5/2 mm)
   sensor/  3. H2 at 1.5 mm sway for a table of sensor classes (latency, noise scale) - edit SENSORS
   offset/  4. signed transverse offsets (web side +, base side -), from seam/baseline runs
+  axial/   5. torch-axis (CTWD) component: angle set rerun + sway z-ratio 0.25 / 1.0 for H2 @ 1.5 mm
+  stance_margin/  6. station planning for the yaw +30 part: reach-margin grid, then R/H1/H2 at the chosen stance
 
-Usage:  python run_supplement.py [--stages seam,angle,sensor,report] [--jobs N]
+Usage:  python run_supplement.py [--stages seam,angle,sensor,axial,stance_margin,report] [--jobs N]
 Folders that already hold a summary.csv are skipped. Existing result folders are never written.
 """
 import argparse
@@ -18,6 +20,8 @@ import sys
 import time
 
 import numpy as np
+
+from sim_core import Params, Pose, Trial, WeldModel, run_trial, sway_coefs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 G1 = os.path.join(HERE, "mujoco_menagerie", "unitree_g1")
@@ -44,6 +48,11 @@ SENSORS = [
 ]
 ANGLE_SWAYS = "0,0.5,1,1.5,2"
 ANGLE_TOL_DEG = 5.0      # assumption, no source
+# experiment 5: auxiliary component-wise criterion (transverse <= 1.0 mm AND axial <= 2.0 mm; CTWD tolerance is an assumption)
+Z_RATIOS = [0.25, 1.0]
+# experiment 6: station shifts (m) along the seam towards its far end, and the stance-error budget corners
+STANCE_SHIFTS = [0.0, 0.05, 0.10, 0.15]
+STANCE_BUDGET = (0.050, 5.0)     # radius 50 mm (disk, as sampled), +-5 deg
 
 
 def run_study(out, *args, jobs):
@@ -114,6 +123,63 @@ def stage_sensor(jobs):
         name = f"{label.split()[0]}_lat{lat:g}ms_noise{scale:g}x"
         log_time(f"sensor/{name}", run_study(os.path.join(OUT, "sensor", name), "--conds", "H2", "--sways", str(TOP_SWAY),
                  "--comp-latency", str(lat), "--comp-noise-scale", str(scale), jobs=jobs))
+
+
+def stage_axial(jobs):
+    log_time("axial/main", run_study(os.path.join(OUT, "axial", "main"), "--sways", ANGLE_SWAYS, jobs=jobs))
+    for z in Z_RATIOS:
+        log_time(f"axial/zratio_{z:g}", run_study(os.path.join(OUT, "axial", f"zratio_{z:g}"), "--conds", "H2",
+                 "--sways", str(TOP_SWAY), "--sway-z-ratio", str(z), jobs=jobs))
+
+
+def plan_stance(scene):
+    """Reach-margin grid: shift the station along the seam towards its far end and require IK
+    convergence (H1, no sway, no part error) at the 8 worst cases of the stance-error budget:
+    4 points on the 50 mm circle (+-x, +-y) x yaw +-5 deg. (The square corners (+-50, +-50) lie
+    at radius 71 mm, outside the sampled disk, so they are not used.)"""
+    wm0 = WeldModel(scene, Params())
+    far_sign = 1.0 if np.linalg.norm(wm0.seam1 - wm0.nominal.pos) > np.linalg.norm(wm0.seam0 - wm0.nominal.pos) else -1.0
+    d = far_sign * wm0.u_n[:2]
+    e, yaw = STANCE_BUDGET
+    grid = []
+    for sh in STANCE_SHIFTS:
+        xy = tuple(float(v) for v in np.array(Params().stance_xy) + sh * d)
+        wm = WeldModel(scene, Params(stance_xy=xy))
+        ok = 0
+        for dx, dy in ((e, 0.0), (-e, 0.0), (0.0, e), (0.0, -e)):
+            for dyaw in (-yaw, yaw):
+                rng = np.random.default_rng(0)
+                st = Pose(wm.nominal.pos + np.array([dx, dy, 0.0]), wm.nominal.yaw + np.deg2rad(dyaw))
+                tr = Trial(st, np.zeros(3), 0.0, sway_coefs(rng, wm.P), sway_coefs(rng, wm.P))
+                ok += int(run_trial(wm, tr, "H1", 0.0, rng)["feasible"])
+        # pelvis -> torch-tip distance at seam start / middle / end (lever arm for rotational sway)
+        L = np.linalg.norm(wm.seam1 - wm.seam0)
+        q, lever = wm.q_home.copy(), []
+        for sp in (wm.P.seam_margin, L / 2, L - wm.P.seam_margin):
+            q, _ = wm.ik(wm.nominal, wm.seam0 + wm.u_n * sp, wm.a_draw, q)
+            lever.append(round(float(np.linalg.norm(wm.fk(wm.nominal, q)[0] - wm.nominal.pos) * 1000)))
+        grid.append(dict(shift_mm=sh * 1000, stance_xy=xy, corners_ok=ok, lever_mm=lever))
+    passing = [g for g in grid if g["corners_ok"] == 8]
+    chosen = passing[0] if passing else grid[-1]
+    plan = dict(direction_xy=[float(v) for v in d], grid=grid, chosen=chosen, all_corners_pass=bool(passing))
+    os.makedirs(os.path.join(OUT, "stance_margin"), exist_ok=True)
+    json.dump(plan, open(os.path.join(OUT, "stance_margin", "plan.json"), "w"), indent=1)
+    return plan
+
+
+def stage_stance_margin(jobs):
+    scene = os.path.join(G1, "weld_scene_yaw30.xml")
+    if not os.path.exists(scene):
+        subprocess.run([sys.executable, os.path.join(HERE, "build_scene.py"), "--part-yaw", "30", "--name", "weld_scene_yaw30"],
+                       check=True, stdout=subprocess.DEVNULL)
+    pj = os.path.join(OUT, "stance_margin", "plan.json")
+    plan = json.load(open(pj)) if os.path.exists(pj) else plan_stance(scene)
+    xy = ",".join(f"{v:.4f}" for v in plan["chosen"]["stance_xy"])
+    base = os.path.join(OUT, "stance_margin", "yaw+30_planned")
+    log_time("stance_margin/sway1.5", run_study(os.path.join(base, "sway1.5"), "--scene", scene, "--stance-xy", xy,
+             "--conds", "R,H1,H2", "--sways", str(TOP_SWAY), jobs=jobs))
+    log_time("stance_margin/H1_sway0.3", run_study(os.path.join(base, "H1_sway0.3"), "--scene", scene, "--stance-xy", xy,
+             "--conds", "H1", "--sways", "0.3", jobs=jobs))
 
 
 # ------------------------------------------------------------------ report
@@ -243,6 +309,61 @@ def report():
     md.append(f"\n**한 줄 결론:** H1(0.3 mm)은 +{r1['off_web_p95_mm']:.2f} / {r1['off_base_p05_mm']:.2f} mm, H2(1.5 mm)는 +{r2['off_web_p95_mm']:.2f} / {r2['off_base_p05_mm']:.2f} mm(p95 / p5)로 "
               "양쪽이 거의 대칭이다. 흔들림이 무작위 위상이라 어느 한쪽으로 치우칠 이유가 없다.")
 
+    # ---- 5. torch-axis (CTWD) component
+    if os.path.exists(os.path.join(OUT, "axial", "main", "summary.csv")):
+        ax = load(os.path.join(OUT, "axial", "main", "summary.csv"))
+        feas.append(("axial/main", ax))
+        md.append("\n## 실험 5. 토치 축 방향 오차 (CTWD 변화; + 멀어짐, − 파고듦)\n")
+        md.append(f"수직 거리² − (가로² + 축 방향²) 최대 오차: {max(r['perp_check_max_mm2'] for r in ax):.2e} mm²\n")
+        md.append("| 조건 | 흔들림 mm | 최대 \\|축\\| 평균 mm | p95 mm | 최대 + 중앙값 mm | 최대 − 중앙값 mm | ±1 mm 안 % | ±2 mm 안 % | 참고: 최대 \\|가로\\| 평균 mm |")
+        md.append("|---|---|---|---|---|---|---|---|---|")
+        for r in ax:
+            tra = np.mean([abs(x) for x in (r["off_web_med_mm"], r["off_base_med_mm"])])
+            md.append(f"| {r['cond']} | {r['sway_mm']:g} | {r['ax_abs_max_mean_mm']:.2f} | {r['ax_abs_max_p95_mm']:.2f} | {r['ax_max_med_mm']:+.2f} | "
+                      f"{r['ax_min_med_mm']:+.2f} | {r['ax_within1_pct']:.1f} | {r['ax_within2_pct']:.1f} | {r['max_mean_mm']:.2f} (수직 거리) |")
+        md.append("\n보조 기준(가로 ≤ 1.0 mm 그리고 축 방향 ≤ 2.0 mm; CTWD 허용값은 가정)과 1차 지표 비교:\n")
+        md.append("| 조건 | 흔들림 mm | 1차: 수직 거리 ≤ 1.0 mm % | 1차: ≤ 1.5 mm % | 보조: 가로 ≤ 1.0 & 축 ≤ 2.0 % |")
+        md.append("|---|---|---|---|---|")
+        for r in ax:
+            md.append(f"| {r['cond']} | {r['sway_mm']:g} | {r['success_1.0mm_pct']:.1f} | {r['success_1.5mm_pct']:.1f} | {r['success_comp_t1.0_a2.0_pct']:.1f} |")
+        md.append("\n흔들림 z 비율 민감도 (H2, 흔들림 1.5 mm):\n")
+        md.append("| z 비율 | 최대 \\|축\\| 평균 mm | 1차 ≤ 1.0 / 1.5 mm % | 보조 기준 % |")
+        md.append("|---|---|---|---|")
+        for z in [0.5] + Z_RATIOS:
+            r = row(ax, "H2", TOP_SWAY) if z == 0.5 else row(load(os.path.join(OUT, "axial", f"zratio_{z:g}", "summary.csv")), "H2", TOP_SWAY)
+            if z != 0.5:
+                feas.append((f"axial/zratio_{z:g}", [r]))
+            md.append(f"| {z:g}{' (기본)' if z == 0.5 else ''} | {r['ax_abs_max_mean_mm']:.2f} | {r['success_1.0mm_pct']:.1f} / {r['success_1.5mm_pct']:.1f} | {r['success_comp_t1.0_a2.0_pct']:.1f} |")
+
+    # ---- 6. station planning for the yaw +30 part
+    pj = os.path.join(OUT, "stance_margin", "plan.json")
+    if os.path.exists(pj) and os.path.exists(os.path.join(OUT, "stance_margin", "yaw+30_planned", "sway1.5", "summary.csv")):
+        plan = json.load(open(pj))
+        md.append("\n## 실험 6. yaw +30° 부재에 대한 서는 위치 계획 (도달 여유)\n")
+        md.append("| 이동량 mm | stance (x, y) m | 예산 최악 8개 중 IK 수렴 | 골반–토치 거리 시작/중간/끝 mm |")
+        md.append("|---|---|---|---|")
+        for g in plan["grid"]:
+            md.append(f"| {g['shift_mm']:g} | ({g['stance_xy'][0]:.3f}, {g['stance_xy'][1]:.3f}) | {g['corners_ok']}/8 | {' / '.join(str(v) for v in g['lever_mm'])} |")
+        c = plan["chosen"]
+        md.append(f"\n고른 값: {c['shift_mm']:g} mm (용접선 방향 {np.round(plan['direction_xy'], 3).tolist()} 쪽), stance ({c['stance_xy'][0]:.3f}, {c['stance_xy'][1]:.3f})"
+                  + ("" if plan["all_corners_pass"] else " — 어느 이동량도 8/8을 만족하지 못해 가장 큰 이동량을 사용"))
+        pl = load(os.path.join(OUT, "stance_margin", "yaw+30_planned", "sway1.5", "summary.csv")) + \
+             load(os.path.join(OUT, "stance_margin", "yaw+30_planned", "H1_sway0.3", "summary.csv"))
+        feas.append(("stance_margin/yaw+30_planned", pl))
+        un = seam["yaw+30"]
+        md.append("\n| 조건 | 흔들림 | 기준 0°: feasible / 최대 이탈 / 성공 1.0 / 1.5 | +30° 계획 전 | +30° 계획 후 |")
+        md.append("|---|---|---|---|---|")
+        worst = 0.0
+        for cond, sw in [("R", 0.0), ("H1", 0.3), ("H1", TOP_SWAY), ("H2", TOP_SWAY)]:
+            cells = []
+            for rows in (base, un, pl):
+                r = row(rows, cond, sw)
+                cells.append(f"{r['feasible_pct']:.1f}% / {r['max_mean_mm']:.2f} mm / {r['success_1.0mm_pct']:.1f} / {r['success_1.5mm_pct']:.1f}")
+            r0, r2 = row(base, cond, sw), row(pl, cond, sw)
+            worst = max(worst, max(abs(r2[f"success_{t}mm_pct"] - r0[f"success_{t}mm_pct"]) for t in (1.0, 1.5)))
+            md.append(f"| {cond} | {sw:g} | " + " | ".join(cells) + " |")
+        md.append(f"\n계획 후 기준 대비 성공률 최대 |차이|: {worst:.1f}%p")
+
     # ---- totals
     t = json.load(open(os.path.join(OUT, "timing.json")))
     n_total = sum(int(r["n"]) for _, rows in feas for r in rows)
@@ -258,7 +379,7 @@ def report():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stages", default="seam,angle,sensor,report")
+    ap.add_argument("--stages", default="seam,angle,sensor,axial,stance_margin,report")
     ap.add_argument("--jobs", type=int, default=os.cpu_count())
     a = ap.parse_args()
     os.makedirs(OUT, exist_ok=True)
@@ -269,6 +390,10 @@ def main():
         stage_angle(a.jobs)
     if "sensor" in st:
         stage_sensor(a.jobs)
+    if "axial" in st:
+        stage_axial(a.jobs)
+    if "stance_margin" in st:
+        stage_stance_margin(a.jobs)
     if "report" in st:
         report()
 

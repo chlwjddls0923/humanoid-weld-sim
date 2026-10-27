@@ -47,6 +47,8 @@ def _job(args):
                 feasible=int(r["feasible"]), ik_err_mm=r["ik_err"] * 1000, touch_ok=int(r["touch_ok"]),
                 along_start_mm=r["along_start"] * 1000, along_end_mm=r["along_end"] * 1000,
                 off_web_max_mm=r["off_web_max"] * 1000, off_base_max_mm=r["off_base_max"] * 1000,
+                trans_abs_max_mm=r["trans_abs_max"] * 1000, ax_max_mm=r["ax_max"] * 1000, ax_min_mm=r["ax_min"] * 1000,
+                ax_abs_max_mm=r["ax_abs_max"] * 1000, perp_check_mm2=r["perp_check"] * 1e6,
                 ang_max_deg=r["ang_max"], ang_mean_deg=r["ang_mean"], work_max_deg=r["work_max"],
                 travel_max_deg=r["travel_max"], stance_err_mm=st,
                 stance_yaw_deg=np.rad2deg(trial.stance.yaw - wm.nominal.yaw),
@@ -80,6 +82,14 @@ def summarize(rows, tols):
                    ang_le5deg_pct=100 * np.mean((ang <= 5.0) & fe),
                    off_web_med_mm=np.median(ow), off_web_p95_mm=np.percentile(ow, 95),
                    off_base_med_mm=np.median(ob), off_base_p05_mm=np.percentile(ob, 5))
+        # torch-axis (CTWD) component and the component-wise auxiliary criterion
+        axa = np.array([r["ax_abs_max_mm"] for r in sel])
+        tra = np.array([r["trans_abs_max_mm"] for r in sel])
+        row.update(ax_abs_max_mean_mm=axa.mean(), ax_abs_max_p95_mm=np.percentile(axa, 95),
+                   ax_max_med_mm=np.median([r["ax_max_mm"] for r in sel]), ax_min_med_mm=np.median([r["ax_min_mm"] for r in sel]),
+                   ax_within1_pct=100 * np.mean((axa <= 1.0) & fe), ax_within2_pct=100 * np.mean((axa <= 2.0) & fe),
+                   perp_check_max_mm2=max(r["perp_check_mm2"] for r in sel))
+        row["success_comp_t1.0_a2.0_pct"] = 100 * np.mean((tra <= 1.0) & (axa <= 2.0) & fe)
         out.append(row)
     return out
 
@@ -178,6 +188,8 @@ def main():
                     help="H2 body-state estimation latency in ms (default 20)")
     ap.add_argument("--sway-freq", default=None,
                     help="sway frequency band 'lo,hi' in Hz (default 0.3,2.0)")
+    ap.add_argument("--sway-z-ratio", type=float, default=None, help="vertical sway relative to horizontal (default 0.5)")
+    ap.add_argument("--stance-xy", default=None, help="station pelvis x,y in m (default 0.09,-0.01)")
     ap.add_argument("--comp-noise-scale", type=float, default=None,
                     help="scale H2 estimator noise (translation 0.1 mm and rotation 0.3 mrad together); 0 = noise-free")
     ap.add_argument("--fine-trials", type=int, default=200)
@@ -199,6 +211,10 @@ def main():
         params_kw["comp_latency"] = a.comp_latency / 1000.0
     if a.sway_freq:
         params_kw["sway_freq"] = tuple(float(f) for f in a.sway_freq.split(","))
+    if a.sway_z_ratio is not None:
+        params_kw["sway_z_ratio"] = a.sway_z_ratio
+    if a.stance_xy:
+        params_kw["stance_xy"] = tuple(float(v) for v in a.stance_xy.split(","))
     if a.comp_noise_scale is not None:
         base = Params()
         params_kw["comp_noise"] = base.comp_noise * a.comp_noise_scale

@@ -14,5 +14,10 @@
  "sensor/B_lat5ms_noise1.5x": 7.6,
  "sensor/C_lat2ms_noise0.2x": 7.8,
  "sensor/D_lat5ms_noise0.5x": 7.5,
- "sensor/E_lat20ms_noise1x": 7.6
+ "sensor/E_lat20ms_noise1x": 7.6,
+ "axial/main": 77.3,
+ "axial/zratio_0.25": 7.2,
+ "axial/zratio_1": 7.3,
+ "stance_margin/sway1.5": 19.9,
+ "stance_margin/H1_sway0.3": 7.0
 }

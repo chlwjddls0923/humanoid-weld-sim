@@ -402,10 +402,11 @@ def run_trial(wm: WeldModel, trial: Trial, cond: str, sway_amp: float, rng, q_ca
     e_trans = (n_web_w + ez) / np.sqrt(2.0)       # transverse: + towards the web plate, - towards the base plate
     a_ref = R_part @ wm.a_draw                     # torch axis the drawing asks for, on the actual part
     a_ref = a_ref / np.linalg.norm(a_ref)
+    e_axial = -a_ref                               # along the torch axis: + away from the work (CTWD up), - plunging
 
     q = wm.q_home.copy() if q_cache is None else q_cache
     devs, worst_ik = [], 0.0
-    trans, angs, works, travels = [], [], [], []
+    trans, axial, angs, works, travels = [], [], [], [], []
     tip_first = tip = None
     rec = dict(q=[], base=[], tip=[])
     for t in ts:
@@ -421,6 +422,7 @@ def run_trial(wm: WeldModel, trial: Trial, cond: str, sway_amp: float, rng, q_ca
         v_perp = v - (v @ u_w) * u_w
         devs.append(np.linalg.norm(v_perp))                # distance to actual seam line
         trans.append(v_perp @ e_trans)
+        axial.append(v_perp @ e_axial)
         # torch axis error vs. the drawing axis on the actual part: total, and split into
         # travel angle (tilt along the seam) and work angle (tilt in the plane normal to the seam)
         angs.append(np.degrees(np.arccos(np.clip(ax @ a_ref, -1.0, 1.0))))
@@ -430,10 +432,13 @@ def run_trial(wm: WeldModel, trial: Trial, cond: str, sway_amp: float, rng, q_ca
             rec["q"].append(q.copy())
             rec["base"].append(b)
             rec["tip"].append(tip)
-    devs, trans, angs = np.array(devs), np.array(trans), np.array(angs)
+    devs, trans, axial, angs = np.array(devs), np.array(trans), np.array(axial), np.array(angs)
     out = dict(max=devs.max(), rms=np.sqrt((devs ** 2).mean()), ik_err=worst_ik, touch_ok=touch_ok,
                feasible=(worst_ik < 1e-5) and touch_ok,
                off_web_max=trans.max(), off_base_max=trans.min(),       # signed transverse offsets (m)
+               trans_abs_max=np.abs(trans).max(),
+               ax_max=axial.max(), ax_min=axial.min(), ax_abs_max=np.abs(axial).max(),   # along torch axis (m)
+               perp_check=np.abs(devs ** 2 - trans ** 2 - axial ** 2).max(),            # should be ~0
                ang_max=angs.max(), ang_mean=angs.mean(),                 # torch axis error (deg)
                work_max=np.abs(works).max(), travel_max=np.abs(travels).max(),
                along_start=(tip_first - s0w) @ u_w - P.seam_margin,      # 0 = weld starts where it should
