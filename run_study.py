@@ -8,6 +8,7 @@ Usage:
   python run_study.py --two-point-touch    # no end-face search, seam position from the drawing (v1)
   python run_study.py --conds H2 --fine "" --comp-latency 5   # H2 only, 5 ms estimator latency
   python run_study.py --sway-freq 0.3,0.8  # low-frequency sway band
+  python run_study.py --conds H2 --comp-noise-scale 0.5   # half the H2 estimator noise
 Outputs (results/):
   trials.csv      one row per simulated weld
   summary.csv     success rate per condition / sway / tolerance
@@ -166,6 +167,8 @@ def main():
                     help="H2 body-state estimation latency in ms (default 20)")
     ap.add_argument("--sway-freq", default=None,
                     help="sway frequency band 'lo,hi' in Hz (default 0.3,2.0)")
+    ap.add_argument("--comp-noise-scale", type=float, default=None,
+                    help="scale H2 estimator noise (translation 0.1 mm and rotation 0.3 mrad together); 0 = noise-free")
     ap.add_argument("--fine-trials", type=int, default=200)
     ap.add_argument("--seed", type=int, default=2026)
     ap.add_argument("--jobs", type=int, default=os.cpu_count())
@@ -184,6 +187,10 @@ def main():
         params_kw["comp_latency"] = a.comp_latency / 1000.0
     if a.sway_freq:
         params_kw["sway_freq"] = tuple(float(f) for f in a.sway_freq.split(","))
+    if a.comp_noise_scale is not None:
+        base = Params()
+        params_kw["comp_noise"] = base.comp_noise * a.comp_noise_scale
+        params_kw["comp_noise_rot"] = base.comp_noise_rot * a.comp_noise_scale
     conds = [c.strip() for c in a.conds.split(",") if c.strip()]
     P = Params(**params_kw)
     print(f"conds={conds}, sway_freq={P.sway_freq} Hz, comp_latency={P.comp_latency * 1000:g} ms, "
