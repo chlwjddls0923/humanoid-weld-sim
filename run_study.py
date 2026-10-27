@@ -1,0 +1,190 @@
+"""Monte-Carlo study: can a humanoid keep fillet-weld torch accuracy on a shipyard
+sub-assembly part under standing-position error and body sway?
+
+Usage:
+  python run_study.py                      # default: 300 trials, sway 0/1/2/3/5 mm
+  python run_study.py --trials 50 --jobs 4 # quick run
+Outputs (results/):
+  trials.csv      one row per simulated weld
+  summary.csv     success rate per condition / sway / tolerance
+  threshold.csv   fine sway sweep for H1 (current technology)
+  fig1_success_vs_sway.png, fig2_stance_error.png, fig3_threshold.png
+"""
+import argparse
+import csv
+import os
+from multiprocessing import Pool
+
+import numpy as np
+
+from sim_core import Params, WeldModel, sample_trial, run_trial
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+XML = os.path.join(HERE, "mujoco_menagerie", "unitree_g1", "weld_scene.xml")
+_WM = None
+
+
+def _init():
+    global _WM
+    _WM = WeldModel(XML, Params())
+
+
+def _job(args):
+    cond, sway_mm, i, seed = args
+    wm = _WM
+    rng_trial = np.random.default_rng([seed, i])            # same errors for every condition
+    trial = sample_trial(wm, rng_trial, humanoid=(cond != "R"))
+    cid = {"R": 0, "H0": 1, "H1": 2, "H2": 3}[cond]
+    rng_run = np.random.default_rng([seed, i, cid, int(round(sway_mm * 100))])
+    r = run_trial(wm, trial, cond, sway_mm / 1000.0, rng_run)
+    st = np.linalg.norm(trial.stance.pos[:2] - wm.nominal.pos[:2]) * 1000
+    return dict(cond=cond, sway_mm=sway_mm, trial=i, max_mm=r["max"] * 1000, rms_mm=r["rms"] * 1000,
+                feasible=int(r["feasible"]), ik_err_mm=r["ik_err"] * 1000, stance_err_mm=st,
+                stance_yaw_deg=np.rad2deg(trial.stance.yaw - wm.nominal.yaw),
+                part_err_mm=np.linalg.norm(trial.part_shift[:2]) * 1000,
+                part_yaw_deg=np.rad2deg(trial.part_yaw))
+
+
+def run_jobs(jobs, n_proc):
+    with Pool(n_proc, initializer=_init) as pool:
+        return pool.map(_job, jobs, chunksize=4)
+
+
+def summarize(rows, tols):
+    out = []
+    keys = sorted({(r["cond"], r["sway_mm"]) for r in rows}, key=lambda k: ("RH0H1H2".find(k[0]), k[1]))
+    for cond, sw in keys:
+        sel = [r for r in rows if r["cond"] == cond and r["sway_mm"] == sw]
+        mx = np.array([r["max_mm"] for r in sel])
+        fe = np.array([r["feasible"] for r in sel], bool)
+        row = dict(cond=cond, sway_mm=sw, n=len(sel), feasible_pct=100 * fe.mean(),
+                   max_mean_mm=mx.mean(), max_p95_mm=np.percentile(mx, 95), rms_mean_mm=np.mean([r["rms_mm"] for r in sel]))
+        for tol in tols:
+            row[f"success_{tol}mm_pct"] = 100 * np.mean((mx <= tol) & fe)
+        out.append(row)
+    return out
+
+
+def write_csv(path, rows):
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: (f"{v:.4f}" if isinstance(v, float) else v) for k, v in r.items()})
+
+
+def plots(summary, rows, thr, tols, outdir):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib import font_manager
+    for name in ["Noto Sans CJK KR", "AppleGothic", "Apple SD Gothic Neo", "Malgun Gothic", "NanumGothic"]:
+        if any(name in f.name for f in font_manager.fontManager.ttflist):
+            plt.rcParams["font.family"] = name
+            break
+    plt.rcParams["axes.unicode_minus"] = False
+    style = {"R": ("고정형 로봇 (기준)", "#6b7280", "s"), "H0": ("휴머노이드 · 보정 없음", "#dc2626", "x"),
+             "H1": ("휴머노이드 · 출발 전 터치 보정", "#2563eb", "o"),
+             "H2": ("휴머노이드 · 터치 보정 + 실시간 몸통 보상", "#16a34a", "^")}
+    sways = sorted({s["sway_mm"] for s in summary if s["cond"] != "R"})
+
+    fig, axes = plt.subplots(1, len(tols), figsize=(4.2 * len(tols), 3.6), sharey=True)
+    for ax, tol in zip(np.atleast_1d(axes), tols):
+        for c in ["H0", "H1", "H2"]:
+            ys = [next(s for s in summary if s["cond"] == c and s["sway_mm"] == sw)[f"success_{tol}mm_pct"] for sw in sways]
+            ax.plot(sways, ys, marker=style[c][2], color=style[c][1], label=style[c][0])
+        rr = next(s for s in summary if s["cond"] == "R")[f"success_{tol}mm_pct"]
+        ax.axhline(rr, color=style["R"][1], ls="--", lw=1, label=style["R"][0])
+        ax.set_title(f"허용 오차 {tol} mm")
+        ax.set_xlabel("몸통 흔들림 최대 변위 (mm)")
+        ax.grid(alpha=0.3)
+        ax.set_ylim(-3, 103)
+    np.atleast_1d(axes)[0].set_ylabel("용접 성공률 (%)")
+    h, l = np.atleast_1d(axes)[0].get_legend_handles_labels()
+    fig.legend(h, l, loc="lower center", ncol=4, fontsize=8, frameon=False)
+    fig.tight_layout(rect=(0, 0.08, 1, 1))
+    fig.savefig(os.path.join(outdir, "fig1_success_vs_sway.png"), dpi=200)
+
+    fig, ax = plt.subplots(figsize=(5, 3.6))
+    for c in ["H0", "H1"]:
+        sel = [r for r in rows if r["cond"] == c and r["sway_mm"] == 0]
+        ax.scatter([r["stance_err_mm"] for r in sel], [r["max_mm"] for r in sel], s=8,
+                   color=style[c][1], label=style[c][0], alpha=0.7)
+    ax.axhline(1.0, color="k", lw=0.8, ls=":")
+    ax.set_yscale("log")
+    ax.set_xlabel("서는 위치 오차 (mm)")
+    ax.set_ylabel("용접선 최대 이탈 (mm, 로그)")
+    ax.set_title("서는 위치 오차의 영향 (흔들림 0 mm)")
+    ax.legend(fontsize=7)
+    ax.grid(alpha=0.3, which="both")
+    fig.tight_layout()
+    fig.savefig(os.path.join(outdir, "fig2_stance_error.png"), dpi=200)
+
+    if thr:
+        fig, ax = plt.subplots(figsize=(5, 3.6))
+        xs = [t["sway_mm"] for t in thr]
+        for tol, col in zip(tols, ["#93c5fd", "#2563eb", "#1e3a8a"]):
+            ax.plot(xs, [t[f"success_{tol}mm_pct"] for t in thr], marker="o", ms=3, color=col, label=f"허용 {tol} mm")
+        ax.axhline(95, color="k", lw=0.8, ls=":")
+        ax.set_xlabel("몸통 흔들림 최대 변위 (mm)")
+        ax.set_ylabel("성공률 (%)")
+        ax.set_title("현재 기술(출발 전 터치 보정)의 흔들림 한계")
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(os.path.join(outdir, "fig3_threshold.png"), dpi=200)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--trials", type=int, default=300)
+    ap.add_argument("--sways", default="0,1,2,3,5")
+    ap.add_argument("--tols", default="0.5,1.0,1.5")
+    ap.add_argument("--fine", default="0,0.25,0.5,0.75,1,1.25,1.5,1.75,2,2.5,3",
+                    help="sway levels (mm) for the H1 threshold sweep; empty to skip")
+    ap.add_argument("--fine-trials", type=int, default=200)
+    ap.add_argument("--seed", type=int, default=2026)
+    ap.add_argument("--jobs", type=int, default=os.cpu_count())
+    ap.add_argument("--out", default=os.path.join(HERE, "results"))
+    ap.add_argument("--plot-only", action="store_true", help="redraw figures from existing CSVs")
+    a = ap.parse_args()
+    os.makedirs(a.out, exist_ok=True)
+    sways = [float(s) for s in a.sways.split(",")]
+    tols = [float(t) for t in a.tols.split(",")]
+    if a.plot_only:
+        def load(name):
+            p = os.path.join(a.out, name)
+            if not os.path.exists(p):
+                return []
+            out = []
+            for r in csv.DictReader(open(p)):
+                out.append({k: (v if k == "cond" else float(v)) for k, v in r.items()})
+            return out
+        plots(load("summary.csv"), load("trials.csv"), load("threshold.csv"), tols, a.out)
+        return
+
+    jobs = [("R", 0.0, i, a.seed) for i in range(a.trials)]
+    for c in ["H0", "H1", "H2"]:
+        jobs += [(c, s, i, a.seed) for s in sways for i in range(a.trials)]
+    print(f"main study: {len(jobs)} welds")
+    rows = run_jobs(jobs, a.jobs)
+    write_csv(os.path.join(a.out, "trials.csv"), rows)
+    summary = summarize(rows, tols)
+    write_csv(os.path.join(a.out, "summary.csv"), summary)
+
+    thr = []
+    if a.fine:
+        fine = [float(s) for s in a.fine.split(",")]
+        fjobs = [("H1", s, i, a.seed + 1) for s in fine for i in range(a.fine_trials)]
+        print(f"threshold sweep: {len(fjobs)} welds")
+        frows = run_jobs(fjobs, a.jobs)
+        thr = summarize(frows, tols)
+        write_csv(os.path.join(a.out, "threshold.csv"), thr)
+
+    plots(summary, rows, thr, tols, a.out)
+    for s in summary:
+        print({k: (round(v, 2) if isinstance(v, float) else v) for k, v in s.items()})
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,5 @@
+mujoco>=3.2
+numpy
+matplotlib
+pillow
+imageio-ffmpeg
