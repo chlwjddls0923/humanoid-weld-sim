@@ -29,9 +29,9 @@ XML = os.path.join(HERE, "mujoco_menagerie", "unitree_g1", "weld_scene.xml")
 _WM = None
 
 
-def _init(params_kw):
+def _init(params_kw, xml=XML):
     global _WM
-    _WM = WeldModel(XML, Params(**params_kw))
+    _WM = WeldModel(xml, Params(**params_kw))
 
 
 def _job(args):
@@ -45,14 +45,17 @@ def _job(args):
     st = np.linalg.norm(trial.stance.pos[:2] - wm.nominal.pos[:2]) * 1000
     return dict(cond=cond, sway_mm=sway_mm, trial=i, max_mm=r["max"] * 1000, rms_mm=r["rms"] * 1000,
                 feasible=int(r["feasible"]), ik_err_mm=r["ik_err"] * 1000, touch_ok=int(r["touch_ok"]),
-                along_start_mm=r["along_start"] * 1000, along_end_mm=r["along_end"] * 1000, stance_err_mm=st,
+                along_start_mm=r["along_start"] * 1000, along_end_mm=r["along_end"] * 1000,
+                off_web_max_mm=r["off_web_max"] * 1000, off_base_max_mm=r["off_base_max"] * 1000,
+                ang_max_deg=r["ang_max"], ang_mean_deg=r["ang_mean"], work_max_deg=r["work_max"],
+                travel_max_deg=r["travel_max"], stance_err_mm=st,
                 stance_yaw_deg=np.rad2deg(trial.stance.yaw - wm.nominal.yaw),
                 part_err_mm=np.linalg.norm(trial.part_shift[:2]) * 1000,
                 part_yaw_deg=np.rad2deg(trial.part_yaw))
 
 
-def run_jobs(jobs, n_proc, params_kw):
-    with Pool(n_proc, initializer=_init, initargs=(params_kw,)) as pool:
+def run_jobs(jobs, n_proc, params_kw, xml=XML):
+    with Pool(n_proc, initializer=_init, initargs=(params_kw, xml)) as pool:
         return pool.map(_job, jobs, chunksize=4)
 
 
@@ -69,6 +72,14 @@ def summarize(rows, tols):
                    along_start_abs_mean_mm=al.mean(), along_start_abs_p95_mm=np.percentile(al, 95))
         for tol in tols:
             row[f"success_{tol}mm_pct"] = 100 * np.mean((mx <= tol) & fe)
+        ang = np.array([r["ang_max_deg"] for r in sel])
+        ow, ob = np.array([r["off_web_max_mm"] for r in sel]), np.array([r["off_base_max_mm"] for r in sel])
+        row.update(ang_max_mean_deg=ang.mean(), ang_max_p95_deg=np.percentile(ang, 95),
+                   work_max_mean_deg=np.mean([r["work_max_deg"] for r in sel]),
+                   travel_max_mean_deg=np.mean([r["travel_max_deg"] for r in sel]),
+                   ang_le5deg_pct=100 * np.mean((ang <= 5.0) & fe),
+                   off_web_med_mm=np.median(ow), off_web_p95_mm=np.percentile(ow, 95),
+                   off_base_med_mm=np.median(ob), off_base_p05_mm=np.percentile(ob, 5))
         out.append(row)
     return out
 
@@ -173,6 +184,7 @@ def main():
     ap.add_argument("--seed", type=int, default=2026)
     ap.add_argument("--jobs", type=int, default=os.cpu_count())
     ap.add_argument("--out", default=os.path.join(HERE, "results"))
+    ap.add_argument("--scene", default=XML, help="scene XML (default: weld_scene.xml built by build_scene.py)")
     ap.add_argument("--plot-only", action="store_true", help="redraw figures from existing CSVs")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -210,6 +222,7 @@ def main():
         return
 
     with open(os.path.join(a.out, "params.txt"), "w") as f:
+        f.write(f"scene = {os.path.relpath(a.scene, HERE)}\n")   # relative: no user paths in results
         for k, v in vars(P).items():
             f.write(f"{k} = {v}\n")
     jobs = [("R", 0.0, i, a.seed) for i in range(a.trials)] if "R" in conds else []
@@ -217,7 +230,7 @@ def main():
         if c in conds:
             jobs += [(c, s, i, a.seed) for s in sways for i in range(a.trials)]
     print(f"main study: {len(jobs)} welds")
-    rows = run_jobs(jobs, a.jobs, params_kw)
+    rows = run_jobs(jobs, a.jobs, params_kw, a.scene)
     write_csv(os.path.join(a.out, "trials.csv"), rows)
     summary = summarize(rows, tols)
     write_csv(os.path.join(a.out, "summary.csv"), summary)
@@ -227,7 +240,7 @@ def main():
         fine = [float(s) for s in a.fine.split(",")]
         fjobs = [("H1", s, i, a.seed + 1) for s in fine for i in range(a.fine_trials)]
         print(f"threshold sweep: {len(fjobs)} welds")
-        frows = run_jobs(fjobs, a.jobs, params_kw)
+        frows = run_jobs(fjobs, a.jobs, params_kw, a.scene)
         thr = summarize(frows, tols)
         write_csv(os.path.join(a.out, "threshold.csv"), thr)
 

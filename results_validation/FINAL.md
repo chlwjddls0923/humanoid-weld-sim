@@ -78,3 +78,4 @@
 - 이번에 추가한 옵션: `run_study.py --comp-noise-scale S` (병진·회전 추정 잡음을 함께 S배, 0이면 무잡음). 지난 검증에서 추가한 `--conds`, `--comp-latency`(ms), `--sway-freq lo,hi`와 함께 쓴다.
 - 새 스크립트: `run_final.py` (`--stages latency_freq,noise,report`, 이미 있는 폴더는 건너뜀).
 
+## 5. 초록 보완 실험 → `abstract_supplement/SUPPLEMENT.md` 참조

@@ -1,0 +1,18 @@
+{
+ "seam/base_L220_yaw0/sway1.5": 20.7,
+ "seam/base_L220_yaw0/H1_sway0.3": 6.9,
+ "seam/L150/sway1.5": 14.8,
+ "seam/L150/H1_sway0.3": 4.8,
+ "seam/L300/sway1.5": 29.2,
+ "seam/L300/H1_sway0.3": 8.4,
+ "seam/yaw+30/sway1.5": 82.3,
+ "seam/yaw+30/H1_sway0.3": 43.1,
+ "seam/yaw-30/sway1.5": 22.4,
+ "seam/yaw-30/H1_sway0.3": 6.8,
+ "angle": 76.5,
+ "sensor/A_lat30ms_noise1x": 7.4,
+ "sensor/B_lat5ms_noise1.5x": 7.6,
+ "sensor/C_lat2ms_noise0.2x": 7.8,
+ "sensor/D_lat5ms_noise0.5x": 7.5,
+ "sensor/E_lat20ms_noise1x": 7.6
+}

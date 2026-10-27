@@ -5,7 +5,11 @@ the right wrist, and adds a work table with a T-joint fillet part.
 Writes weld_scene.xml next to g1.xml so the mesh paths keep working.
 
 Usage:  python build_scene.py [path/to/mujoco_menagerie]
+        python build_scene.py --seam-length 0.30 --part-yaw 30 --name weld_scene_L300_yaw30
+        (variants are written next to weld_scene.xml; the default scene is unchanged)
 """
+import argparse
+import math
 import os
 import sys
 
@@ -40,10 +44,21 @@ def cam(name, pos, target, fovy=45):
     return f'<camera name="{name}" pos="{p}" xyaxes="{v}" fovy="{fovy}"/>'
 
 
-def scene_xml():
+def scene_xml(seam_length=None, part_yaw_deg=0.0):
+    """Default: seam SEAM_Y0..SEAM_Y1 along +y. Variants keep the seam midpoint and rotate the
+    part (plates + seam) about it by part_yaw_deg; the table is enlarged to stay underneath."""
     sy = 0.5 * (SEAM_Y0 + SEAM_Y1)
-    sl = 0.5 * (SEAM_Y1 - SEAM_Y0) + 0.04            # half length of plates
+    half = 0.5 * (SEAM_Y1 - SEAM_Y0) if seam_length is None else 0.5 * seam_length
+    y0, y1 = sy - half, sy + half
+    sl = half + 0.04                                 # half length of plates
     seam_z = TABLE_TOP + BASE_T
+    if seam_length is None and part_yaw_deg == 0.0:
+        part_attr, cx, cy = 'pos="0 0 0"', 0.0, 0.0  # byte-identical default scene
+        table = f'pos="{SEAM_X + 0.10:.4f} {sy:.4f} {TABLE_TOP / 2:.4f}" size="0.22 {sl + 0.06:.4f} {TABLE_TOP / 2:.4f}"'
+    else:
+        q = math.radians(part_yaw_deg) / 2
+        part_attr, cx, cy = f'pos="{SEAM_X:.4f} {sy:.4f} 0" quat="{math.cos(q):.6f} 0 0 {math.sin(q):.6f}"', SEAM_X, sy
+        table = f'pos="{SEAM_X:.4f} {sy:.4f} {TABLE_TOP / 2:.4f}" size="{sl + 0.12:.4f} {sl + 0.12:.4f} {TABLE_TOP / 2:.4f}"'
     return f"""<mujoco model="humanoid fillet welding demo">
   <include file="g1_weld.xml"/>
   <statistic center="0.25 -0.2 0.7" extent="1.2"/>
@@ -64,19 +79,18 @@ def scene_xml():
     <light pos="0.5 -0.5 2.5" dir="-0.2 0.2 -1" diffuse="0.6 0.6 0.6" castshadow="true"/>
     <geom name="floor" type="plane" size="0 0 0.05" material="floor"/>
     <!-- work table -->
-    <geom name="table" type="box" pos="{SEAM_X + 0.10:.4f} {sy:.4f} {TABLE_TOP / 2:.4f}"
-      size="0.22 {sl + 0.06:.4f} {TABLE_TOP / 2:.4f}" material="table"/>
+    <geom name="table" type="box" {table} material="table"/>
     <!-- T-joint part: base plate + web plate (drawing position) -->
-    <body name="part" pos="0 0 0" mocap="true">
+    <body name="part" {part_attr} mocap="true">
       <geom name="base_plate" type="box" material="steel"
-        pos="{SEAM_X + 0.02:.4f} {sy:.4f} {TABLE_TOP + BASE_T / 2:.4f}" size="0.09 {sl:.4f} {BASE_T / 2:.4f}"/>
+        pos="{SEAM_X + 0.02 - cx:.4f} {sy - cy:.4f} {TABLE_TOP + BASE_T / 2:.4f}" size="0.09 {sl:.4f} {BASE_T / 2:.4f}"/>
       <geom name="web_plate" type="box" material="steel"
-        pos="{SEAM_X + WEB_T / 2:.4f} {sy:.4f} {seam_z + WEB_H / 2:.4f}" size="{WEB_T / 2:.4f} {sl:.4f} {WEB_H / 2:.4f}"/>
+        pos="{SEAM_X + WEB_T / 2 - cx:.4f} {sy - cy:.4f} {seam_z + WEB_H / 2:.4f}" size="{WEB_T / 2:.4f} {sl:.4f} {WEB_H / 2:.4f}"/>
       <!-- seam (green line) -->
-      <geom name="seam" type="capsule" fromto="{SEAM_X:.4f} {SEAM_Y0:.4f} {seam_z:.4f} {SEAM_X:.4f} {SEAM_Y1:.4f} {seam_z:.4f}"
+      <geom name="seam" type="capsule" fromto="{SEAM_X - cx:.4f} {y0 - cy:.4f} {seam_z:.4f} {SEAM_X - cx:.4f} {y1 - cy:.4f} {seam_z:.4f}"
         size="0.0012" rgba="0.1 0.85 0.3 1" contype="0" conaffinity="0"/>
-      <site name="seam_start" pos="{SEAM_X:.4f} {SEAM_Y0:.4f} {seam_z:.4f}" size="0.002"/>
-      <site name="seam_end" pos="{SEAM_X:.4f} {SEAM_Y1:.4f} {seam_z:.4f}" size="0.002"/>
+      <site name="seam_start" pos="{SEAM_X - cx:.4f} {y0 - cy:.4f} {seam_z:.4f}" size="0.002"/>
+      <site name="seam_end" pos="{SEAM_X - cx:.4f} {y1 - cy:.4f} {seam_z:.4f}" size="0.002"/>
     </body>
     {cam("wide", (0.75, -1.85, 1.30), (0.22, -0.16, 0.80), 40)}
     {cam("close", (0.24, -0.60, 0.92), (SEAM_X, (SEAM_Y0 + SEAM_Y1) / 2, TABLE_TOP + BASE_T), 38)}
@@ -86,8 +100,13 @@ def scene_xml():
 
 
 def main():
-    root = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "mujoco_menagerie")
-    g1_dir = os.path.join(root, "unitree_g1")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("root", nargs="?", default=os.path.join(os.path.dirname(__file__), "mujoco_menagerie"))
+    ap.add_argument("--seam-length", type=float, default=None, help="seam length in m (default 0.22)")
+    ap.add_argument("--part-yaw", type=float, default=0.0, help="part yaw about the seam midpoint, deg")
+    ap.add_argument("--name", default="weld_scene", help="output file name without .xml")
+    a = ap.parse_args()
+    g1_dir = os.path.join(a.root, "unitree_g1")
     src = open(os.path.join(g1_dir, "g1.xml"), encoding="utf-8").read()
     anchor = 'class="visual" mesh="right_rubber_hand"/>'
     if anchor not in src:
@@ -95,8 +114,8 @@ def main():
     src = src.replace(anchor, anchor + TORCH, 1)
     src = src.replace('<mujoco model="g1_29dof_rev_1_0">', '<mujoco model="g1_weld">', 1)
     open(os.path.join(g1_dir, "g1_weld.xml"), "w", encoding="utf-8").write(src)
-    out = os.path.join(g1_dir, "weld_scene.xml")
-    open(out, "w", encoding="utf-8").write(scene_xml())
+    out = os.path.join(g1_dir, a.name + ".xml")
+    open(out, "w", encoding="utf-8").write(scene_xml(a.seam_length, a.part_yaw))
     print("wrote", out)
 
 

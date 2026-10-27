@@ -1,0 +1,2 @@
+cond,sway_mm,n,feasible_pct,max_mean_mm,max_p95_mm,rms_mean_mm,along_start_abs_mean_mm,along_start_abs_p95_mm,success_0.5mm_pct,success_1.0mm_pct,success_1.5mm_pct,ang_max_mean_deg,ang_max_p95_deg,work_max_mean_deg,travel_max_mean_deg,ang_le5deg_pct,off_web_med_mm,off_web_p95_mm,off_base_med_mm,off_base_p05_mm
+H1,0.3000,300,80.6667,34.6261,154.3039,14.2244,1.1058,7.5570,0.0000,14.3333,67.0000,7.1072,35.0098,7.0384,3.7466,80.6667,0.8419,152.5586,-0.8318,-37.4783

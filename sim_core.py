@@ -145,11 +145,16 @@ class WeldModel:
         self.seam1 = self.d.site_xpos[m.site("seam_end").id].copy()
         self.seam_mid = 0.5 * (self.seam0 + self.seam1)
         self.u_n = (self.seam1 - self.seam0) / np.linalg.norm(self.seam1 - self.seam0)
-        # both plates extend beyond the seam ends by the same amount (seam runs along y in the
-        # scene); the end face is touched to locate the seam along its own direction
+        # seam frame: n_web = horizontal normal of the web face pointing from the robot into the
+        # web plate, u_n = seam direction, z up. The part may be yawed in the scene.
+        self.n_web = np.cross(self.u_n, np.array([0.0, 0.0, 1.0]))
+        self.R_seam = np.column_stack([self.n_web, self.u_n, np.array([0.0, 0.0, 1.0])])
+        self.a_draw = self.R_seam @ np.array(self.P.torch_dir, float)   # torch axis in world (drawing)
+        # both plates extend beyond the seam ends by the same amount; the end face is touched to
+        # locate the seam along its own direction (plate long axis = local y = seam direction)
         g = m.geom("web_plate")
         self.web_half_t = float(g.size[0])
-        end_pt = self.d.geom_xpos[g.id] - np.array([0.0, float(g.size[1]), 0.0])
+        end_pt = self.d.geom_xpos[g.id] - self.d.geom_xmat[g.id].reshape(3, 3) @ np.array([0.0, float(g.size[1]), 0.0])
         self.plate_overhang = float((self.seam0 - end_pt) @ self.u_n)
         z = self.q_stand[2]
         self.nominal = Pose(np.array([self.P.stance_xy[0], self.P.stance_xy[1], z]),
@@ -301,13 +306,13 @@ def touch_point(wm, trial, b_true: Pose, b_bel: Pose, y_pt, rng):
     Returns the measured seam point in the believed frame; y is the commanded (nominal) y."""
     P = wm.P
     s0, _, R = actual_seam(wm, trial)
-    hit_x, l1 = _search(b_true, b_bel, y_pt + np.array([-P.touch_approach, 0.0, 0.03]),
-                        np.array([1.0, 0.0, 0.0]), s0, R @ np.array([1.0, 0.0, 0.0]))
-    hit_z, l2 = _search(b_true, b_bel, y_pt + np.array([-0.02, 0.0, P.touch_approach]),
-                        np.array([0.0, 0.0, -1.0]), s0, np.array([0.0, 0.0, 1.0]))
-    meas = np.array([hit_x[0], y_pt[1], hit_z[2]])
-    meas[[0, 2]] += rng.uniform(-P.touch_noise, P.touch_noise, 2)   # sensor noise on the searched axes
-    return meas, min(l1, l2) > 0
+    Rs, n_web, ez = wm.R_seam, wm.n_web, np.array([0.0, 0.0, 1.0])
+    hit_x, l1 = _search(b_true, b_bel, y_pt - P.touch_approach * n_web + 0.03 * ez, n_web, s0, R @ n_web)
+    hit_z, l2 = _search(b_true, b_bel, y_pt - 0.02 * n_web + P.touch_approach * ez, -ez, s0, ez)
+    # assemble in the seam frame: searched normal / along-seam (commanded) / searched height
+    loc = np.array([(Rs.T @ hit_x)[0], (Rs.T @ y_pt)[1], (Rs.T @ hit_z)[2]])
+    loc[[0, 2]] += rng.uniform(-P.touch_noise, P.touch_noise, 2)   # sensor noise on the searched axes
+    return Rs @ loc, min(l1, l2) > 0
 
 
 def touch_end(wm, trial, b_true: Pose, b_bel: Pose, m1, m2, rng):
@@ -371,7 +376,7 @@ def run_trial(wm: WeldModel, trial: Trial, cond: str, sway_amp: float, rng, q_ca
     believed = est_base if cond == "H2" else (lambda t: belief)
 
     # ---- path in the believed frame
-    a_draw = np.array(P.torch_dir, float)
+    a_draw = wm.a_draw
     touch_ok = True
     if cond == "H0":
         Tp, Rp = (lambda p: p), np.eye(3)
@@ -389,11 +394,18 @@ def run_trial(wm: WeldModel, trial: Trial, cond: str, sway_amp: float, rng, q_ca
             touch_ok &= ok
         Tp, Rp = corrected_path(wm, pts[0], pts[1], s0_meas)
 
-    s0w, s1w, _ = actual_seam(wm, trial)
+    s0w, s1w, R_part = actual_seam(wm, trial)
     u_w = (s1w - s0w) / np.linalg.norm(s1w - s0w)
+    # actual seam frame for the signed offsets and the torch angle components
+    n_web_w = R_part @ wm.n_web
+    ez = np.array([0.0, 0.0, 1.0])
+    e_trans = (n_web_w + ez) / np.sqrt(2.0)       # transverse: + towards the web plate, - towards the base plate
+    a_ref = R_part @ wm.a_draw                     # torch axis the drawing asks for, on the actual part
+    a_ref = a_ref / np.linalg.norm(a_ref)
 
     q = wm.q_home.copy() if q_cache is None else q_cache
     devs, worst_ik = [], 0.0
+    trans, angs, works, travels = [], [], [], []
     tip_first = tip = None
     rec = dict(q=[], base=[], tip=[])
     for t in ts:
@@ -402,18 +414,28 @@ def run_trial(wm: WeldModel, trial: Trial, cond: str, sway_amp: float, rng, q_ca
         q, e = wm.ik(believed(t), p_cmd, a_cmd, q)
         worst_ik = max(worst_ik, e)
         b = base_at(t)
-        tip, _ = wm.fk(b, q)
+        tip, ax = wm.fk(b, q)
         if tip_first is None:
             tip_first = tip
         v = tip - s0w
-        devs.append(np.linalg.norm(v - (v @ u_w) * u_w))   # distance to actual seam line
+        v_perp = v - (v @ u_w) * u_w
+        devs.append(np.linalg.norm(v_perp))                # distance to actual seam line
+        trans.append(v_perp @ e_trans)
+        # torch axis error vs. the drawing axis on the actual part: total, and split into
+        # travel angle (tilt along the seam) and work angle (tilt in the plane normal to the seam)
+        angs.append(np.degrees(np.arccos(np.clip(ax @ a_ref, -1.0, 1.0))))
+        travels.append(np.degrees(np.arcsin(np.clip(ax @ u_w, -1.0, 1.0)) - np.arcsin(np.clip(a_ref @ u_w, -1.0, 1.0))))
+        works.append(np.degrees(np.arctan2(ax @ ez, ax @ n_web_w) - np.arctan2(a_ref @ ez, a_ref @ n_web_w)))
         if record:
             rec["q"].append(q.copy())
             rec["base"].append(b)
             rec["tip"].append(tip)
-    devs = np.array(devs)
+    devs, trans, angs = np.array(devs), np.array(trans), np.array(angs)
     out = dict(max=devs.max(), rms=np.sqrt((devs ** 2).mean()), ik_err=worst_ik, touch_ok=touch_ok,
                feasible=(worst_ik < 1e-5) and touch_ok,
+               off_web_max=trans.max(), off_base_max=trans.min(),       # signed transverse offsets (m)
+               ang_max=angs.max(), ang_mean=angs.mean(),                 # torch axis error (deg)
+               work_max=np.abs(works).max(), travel_max=np.abs(travels).max(),
                along_start=(tip_first - s0w) @ u_w - P.seam_margin,      # 0 = weld starts where it should
                along_end=(tip - s0w) @ u_w - (L - P.seam_margin),
                devs=devs, ts=ts)
