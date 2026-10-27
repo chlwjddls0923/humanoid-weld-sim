@@ -1,0 +1,16 @@
+# MuJoCo Menagerie clone or symlink (G1 model; see README "재현 방법") and compiled models
+mujoco_menagerie/
+mujoco_menagerie
+*.mjb
+
+# Python / OS
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+
+# temporary render output and archives
+frames/
+*.rgb
+*.raw
+*.zip

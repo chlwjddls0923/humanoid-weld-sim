@@ -1,35 +1,47 @@
-# 휴머노이드 조선 소조립 정형 용접 시뮬레이션 (MuJoCo)
+# humanoid-weld-sim — 휴머노이드 조선 소조립 정형 용접 시뮬레이션 (MuJoCo)
 
-PPT 13·16쪽의 "휴머노이드 소조립 정형 용접"이 휴머노이드만 겪는 오차(서는 위치 오차, 몸통 흔들림)가 있어도
-용접 허용 오차를 지킬 수 있는지, 지키려면 어떤 보정이 필요한지 확인하는 시뮬레이션입니다.
+한국생산제조학회(KSMTE) 2026 추계학술대회 특별세션 **P06** 발표용 코드와 결과입니다.
+휴머노이드가 조선 소조립 T형 필렛 용접을 할 때, 휴머노이드만 겪는 오차(서는 위치 오차, 몸통 흔들림)가 있어도
+용접 허용 오차를 지킬 수 있는지, 지키려면 어떤 보정이 필요한지를 Unitree G1 모델로 확인합니다.
+
+- 결과 요약: [`results/RESULTS.md`](results/RESULTS.md) (본 결과) → [`results_validation/VALIDATION.md`](results_validation/VALIDATION.md) (가정 민감도) → [`results_validation/FINAL.md`](results_validation/FINAL.md) (논문용 최종 숫자)
+- 초록 보완 실험: `results_validation/abstract_supplement/SUPPLEMENT.md` (용접선 변형, 토치 각도, 센서급)
+
+## 재현 방법
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt                       # mujoco, numpy, matplotlib, pillow, imageio-ffmpeg
+git clone --depth 1 https://github.com/google-deepmind/mujoco_menagerie.git   # G1 모델 (아래 "모델 출처")
+python build_scene.py                                 # mujoco_menagerie/unitree_g1/weld_scene.xml 생성
+
+python run_study.py                                   # 1) 본 실험 → results/            (10코어 약 2분)
+python run_study.py --rot-ratio 0 --out results_rot0  #    회전 흔들림을 끈 비교
+python run_validation.py                              # 2) 검증 스윕 → results_validation/ (약 15분)
+python validate_top.py                                #    TOP Table IV 대조 → model_check.txt
+python run_final.py                                   # 3) 지연×주파수, 잡음 크기 → FINAL 표 (약 8분)
+python run_supplement.py                              # 4) 초록 보완 실험 → abstract_supplement/
+python make_video.py                                  #    데모 영상 results/demo.mp4
+```
+
+빠른 확인: `python run_study.py --trials 30 --fine-trials 30` (약 15초). 모든 스크립트는 seed 2026이 기본이며, 결과 폴더가 이미 있으면 건너뜁니다.
+장면을 직접 보려면 `mjpython -m mujoco.viewer --mjcf=mujoco_menagerie/unitree_g1/weld_scene.xml`.
+화면 없는 Linux 서버에서 영상을 만들 때는 `MUJOCO_GL=egl python make_video.py`.
 
 ## 파일
 
 | 파일 | 역할 |
 |---|---|
-| `build_scene.py` | Unitree G1 모델(mujoco_menagerie)에 용접 토치를 붙이고 작업대·T형 필렛 부재 장면을 만든다 |
-| `sim_core.py` | 역기구학(IK), 터치 센싱 보정, 몸통 흔들림(병진 + 회전), 4개 조건(R·H0·H1·H2) 시뮬레이션 |
-| `run_study.py` | 몬테카를로 반복 실행 → `results/`에 CSV·그래프·사용한 변수(`params.txt`) 저장 |
-| `make_video.py` | 3장면 데모 영상(`results/demo.mp4`) |
-| `results/` | 아래 "실행 환경"에서 실제로 돌린 v2 결과 (요약은 `results/RESULTS.md`) |
-| `results_rot0/` | 같은 코드에서 회전 흔들림만 끈 비교 실험 (`--rot-ratio 0`) |
-| `results_v1_translation_only/` | v1 결과 보존용 (병진 흔들림만, 2점 터치, 백색 추정 잡음) |
-
-## 맥(Apple Silicon)에서 실행
-
-```bash
-python3 -m venv ~/weld-sim && source ~/weld-sim/bin/activate
-pip install mujoco numpy matplotlib pillow imageio-ffmpeg
-cd weld_demo
-git clone --depth 1 https://github.com/google-deepmind/mujoco_menagerie.git
-python build_scene.py                 # weld_scene.xml 생성
-python run_study.py --trials 30 --fine-trials 30   # 빠른 확인 (약 15초)
-python run_study.py                   # 본 실험 (기본 300회, 10코어 약 2분)
-python run_study.py --rot-ratio 0 --out results_rot0   # 회전 흔들림을 끈 비교 실험
-python make_video.py                  # 데모 영상 (약 45초)
-```
-
-장면을 직접 돌려 보려면: `mjpython -m mujoco.viewer --mjcf=mujoco_menagerie/unitree_g1/weld_scene.xml`
+| `build_scene.py` | G1 모델에 용접 토치를 붙이고 작업대·T형 필렛 부재 장면을 만든다 (`--seam-length`, `--part-yaw`로 변형 장면) |
+| `sim_core.py` | 역기구학(IK), 터치 센싱 보정(2점 + 판 끝면), 몸통 흔들림(병진 + 회전), 4개 조건(R·H0·H1·H2) 시뮬레이션 |
+| `run_study.py` | 몬테카를로 실행 → CSV·그래프·`params.txt`. 옵션: `--rot-ratio`, `--two-point-touch`, `--conds`, `--comp-latency`(ms), `--sway-freq`, `--comp-noise-scale`, `--scene` |
+| `run_validation.py` / `run_final.py` / `run_supplement.py` | 검증·최종·초록 보완 실험을 순서대로 돌리고 표를 만든다 |
+| `validate_top.py` | TOP 논문 Table IV의 몸통 오차를 G1 골반에 넣었을 때의 토치 변위 |
+| `make_video.py` | 3장면 데모 영상 |
+| `results/` | v2 본 결과 (300회 × 조건, seed 2026) |
+| `results_rot0/` | 같은 코드에서 회전 흔들림만 끈 비교 |
+| `results_v1_translation_only/` | v1 결과 보존용 (병진만, 2점 터치, 백색 추정 잡음) |
+| `results_validation/` | 검증·최종·초록 보완 실험 결과와 정리 문서 |
 
 ## 조건
 
@@ -52,7 +64,7 @@ python make_video.py                  # 데모 영상 (약 45초)
 | 서는 위치 오차 | 0~50 mm, 방향 ±5° | 가정 |
 | 부재 위치 오차 | 0~10 mm, ±3° | 가정 |
 | 터치 측정 오차 | ±0.25 mm | ABB SmarTac 사양 |
-| 터치 점 | ① 용접선 시작·끝에서 20 mm 안쪽 2곳, 점마다 세로판 면 + 바닥판 면 탐색 → 용접선의 위치·방향 ② 판 끝면 1회 탐색 → 용접선 방향 위치 | FANUC/ABB 시작점 탐색 방식 |
+| 터치 점 | ① 용접선 시작·끝에서 20 mm 안쪽 2곳, 점마다 세로판 면 + 바닥판 면 탐색 ② 판 끝면 1회 탐색 → 용접선 방향 위치 | FANUC/ABB 시작점 탐색 방식 |
 | 터치 탐색 시작 거리 | 믿는 면에서 80 mm | 서는 위치 50 mm + 부재 10 mm 오차보다 크게 |
 | 실시간 보상(H2) | 몸통 자세 추정 지연 20 ms, 잡음 0.1 mm · 0.3 mrad (1σ), 2 Hz 1차 저역통과 | 가정 |
 | 용접 속도 | 6 mm/s, 용접선 220 mm (양 끝 10 mm 제외) | 가정 |
@@ -62,7 +74,7 @@ python make_video.py                  # 데모 영상 (약 45초)
 
 용접 중 0.05 s마다 토치 끝과 **실제** 용접선 사이의 거리를 계산하고, 한 번의 용접에서 가장 큰 값(최대 이탈)이
 허용 오차 이하이면 성공으로 셉니다. IK가 수렴하지 않거나 관절 한계에 걸리거나 터치 탐색이 판 안에서 시작하면 실패로 셉니다.
-용접 시작점이 용접선 방향으로 얼마나 밀렸는지(`along_start_mm`)도 기록하지만, 허용값 출처가 없어 성공 판정에는 넣지 않습니다.
+용접 시작점의 용접선 방향 오차(`along_start_mm`), 토치 축 각도 오차(`ang_max_deg`, 작업각·진행각 성분), 부호 있는 가로 오프셋도 기록합니다.
 
 ## 단순화 (논문에 한계로 명시)
 
@@ -72,18 +84,7 @@ python make_video.py                  # 데모 영상 (약 45초)
 - 팔은 역기구학으로 목표 자세에 정확히 도달한다고 가정한다 (순수 기구학 시뮬레이션, 모터 추종 오차 미포함).
 - 터치 탐색은 직선과 평면의 교점으로 계산하며 판의 유한한 크기와 토치 끝 반지름은 고려하지 않는다.
 
-## v2에서 바뀐 점 (v1 결과는 `results_v1_translation_only/`)
-
-1. 몸통 흔들림에 회전(roll·pitch·yaw)을 추가했다. v1은 병진만 넣어 토치 오차가 흔들림과 1:1이었는데, 골반–토치 거리 348 mm 때문에 실제로는 회전이 더 크게 작용한다.
-2. 판 끝면 터치를 추가해 용접선 방향 위치도 보정한다. v1은 이 방향을 도면값으로 두어 용접 시작점이 평균 20 mm, 최대 약 55 mm 밀렸고, 성공 판정(용접선까지의 수직 거리)에 잡히지 않았다.
-3. 터치 탐색 시작 거리를 40 → 80 mm로 늘렸다. v1은 5%의 시행에서 탐색이 판 안에서 시작했다.
-4. H2 추정 잡음을 20 Hz 백색잡음에서 2 Hz 저역통과 유색잡음으로 바꾸고 회전 잡음을 추가했다.
-5. 본 실험 흔들림 단계에 0.5 mm를 넣고, 세분 실험을 0~3 mm 11단계로 바꿨다.
-6. TOP 논문 인용을 원문 Table IV 값으로 정정했다(아래 "인용").
-
-## 결과 (요약은 `results/RESULTS.md`)
-
-허용 오차 1.0 mm, 조건별 300회:
+## 주요 결과 (허용 오차 1.0 mm, 조건별 300회)
 
 | 몸통 흔들림 | R 고정형 | H0 보정 없음 | H1 터치 보정(현재) | H2 + 실시간 보상 |
 |---|---|---|---|---|
@@ -94,8 +95,9 @@ python make_video.py                  # 데모 영상 (약 45초)
 | 3 mm | — | 0% | 0% | 0% |
 | 5 mm | — | 0% | 0% | 0% |
 
-현재 기술(H1)로 성공률 95% 이상을 유지하는 몸통 흔들림(병진 피크) 한계: 허용 1.0 mm → 0.1 mm, 허용 1.5 mm → 0.2 mm.
-회전을 빼면(`results_rot0/`) 각각 0.5 mm, 0.75 mm.
+- 현재 기술(H1)이 성공률 95%를 유지하는 몸통 흔들림 한계: 허용 1.0 mm 기준 0.1~0.6 mm(회전/병진 비율 0~0.0089 rad/mm에 따라). 실기 수준 1.5 mm에서는 가정을 바꿔도 0%.
+- 실기 수준 흔들림에서 허용 1.5 mm를 지키려면 실시간 보상의 추정 지연이 15 ms 이하(0.3~2 Hz; 저주파 30 ms, 고주파 12 ms). 허용 1.0 mm는 지연 10 ms 이하와 추정 잡음 0.05 mm / 0.15 mrad 이하가 함께 필요.
+- 자세한 수치와 신뢰구간은 `results_validation/FINAL.md`.
 
 ## 인용
 
@@ -107,21 +109,13 @@ python make_video.py                  # 데모 영상 (약 45초)
 - HD현대삼호 협동로봇 용접 사례(Rainbow Robotics) — 터치 센싱 + 아크 센싱 보정.
 - KOBELCO, Robotic Welding System for Shipbuilding (2018) — 3D CAD에서 용접선 자동 추출.
 
-## 검증 실험
+## 모델 출처와 라이선스
 
-v2 결과의 가정 민감도와 통계 신뢰도를 `results_validation/`에서 확인했다. 정리는 `results_validation/VALIDATION.md`에 있다.
-
-```bash
-python run_validation.py     # H2 지연 스윕, 회전 비율, 흔들림 주파수, seed 2027 재실행 + 표 (10코어 약 15분)
-python validate_top.py       # TOP Table IV 몸통 오차 → G1 토치 변위 (model_check.txt)
-```
-
-요약: H1(현재 기술)이 실기 수준 흔들림에서 실패한다는 결론은 모든 가정에서 유지되지만, 한계값은 회전 비율에 따라 0.1~0.6 mm(허용 1.0 mm)다.
-H2는 흔들림 1.5 mm·허용 1.5 mm에서 추정 지연 15 ms 이하가 필요하다. 이 값은 흔들림 주파수와 회전 비율 가정에 좌우된다.
+- Unitree G1 모델: [google-deepmind/mujoco_menagerie](https://github.com/google-deepmind/mujoco_menagerie) `unitree_g1` (BSD-3-Clause, 원 모델은 Unitree Robotics 제공). 이 저장소에는 포함하지 않으며 `build_scene.py`가 클론한 폴더 안에 토치가 붙은 `g1_weld.xml`과 장면 파일을 생성합니다.
+- 이 저장소의 코드와 결과: MIT License (`LICENSE`).
 
 ## 이 결과를 만든 환경
 
 macOS(Apple Silicon, Python 3.14, `pip install mujoco` → MuJoCo 3.17.0, numpy 2.5)에서 10코어로 계산했습니다.
-본 실험 7,900회 용접에 약 2분, 영상 약 45초. 같은 seed(2026)면 같은 플랫폼에서는 수치가 완전히 같고,
-다른 플랫폼에서는 부동소수점 차이로 소수점 아래가 미세하게 다를 수 있습니다.
-화면 없는 Linux 서버(KW-VIP)에서 영상을 만들 때는 `MUJOCO_GL=egl python make_video.py`.
+같은 seed(2026)면 같은 플랫폼에서는 수치가 완전히 같고, 다른 플랫폼에서는 부동소수점 차이로 소수점 아래가 미세하게 다를 수 있습니다.
+전체 실행량(v2 + 검증 + 최종)은 98,800회 용접, 약 26분입니다.
