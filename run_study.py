@@ -2,8 +2,10 @@
 sub-assembly part under standing-position error and body sway?
 
 Usage:
-  python run_study.py                      # default: 300 trials, sway 0/1/2/3/5 mm
+  python run_study.py                      # default: 300 trials, sway 0/0.5/1/2/3/5 mm
   python run_study.py --trials 50 --jobs 4 # quick run
+  python run_study.py --rot-ratio 0        # translation-only sway (v1 behaviour)
+  python run_study.py --two-point-touch    # no end-face search, seam position from the drawing (v1)
 Outputs (results/):
   trials.csv      one row per simulated weld
   summary.csv     success rate per condition / sway / tolerance
@@ -24,9 +26,9 @@ XML = os.path.join(HERE, "mujoco_menagerie", "unitree_g1", "weld_scene.xml")
 _WM = None
 
 
-def _init():
+def _init(params_kw):
     global _WM
-    _WM = WeldModel(XML, Params())
+    _WM = WeldModel(XML, Params(**params_kw))
 
 
 def _job(args):
@@ -39,14 +41,15 @@ def _job(args):
     r = run_trial(wm, trial, cond, sway_mm / 1000.0, rng_run)
     st = np.linalg.norm(trial.stance.pos[:2] - wm.nominal.pos[:2]) * 1000
     return dict(cond=cond, sway_mm=sway_mm, trial=i, max_mm=r["max"] * 1000, rms_mm=r["rms"] * 1000,
-                feasible=int(r["feasible"]), ik_err_mm=r["ik_err"] * 1000, stance_err_mm=st,
+                feasible=int(r["feasible"]), ik_err_mm=r["ik_err"] * 1000, touch_ok=int(r["touch_ok"]),
+                along_start_mm=r["along_start"] * 1000, along_end_mm=r["along_end"] * 1000, stance_err_mm=st,
                 stance_yaw_deg=np.rad2deg(trial.stance.yaw - wm.nominal.yaw),
                 part_err_mm=np.linalg.norm(trial.part_shift[:2]) * 1000,
                 part_yaw_deg=np.rad2deg(trial.part_yaw))
 
 
-def run_jobs(jobs, n_proc):
-    with Pool(n_proc, initializer=_init) as pool:
+def run_jobs(jobs, n_proc, params_kw):
+    with Pool(n_proc, initializer=_init, initargs=(params_kw,)) as pool:
         return pool.map(_job, jobs, chunksize=4)
 
 
@@ -57,8 +60,10 @@ def summarize(rows, tols):
         sel = [r for r in rows if r["cond"] == cond and r["sway_mm"] == sw]
         mx = np.array([r["max_mm"] for r in sel])
         fe = np.array([r["feasible"] for r in sel], bool)
+        al = np.abs([r["along_start_mm"] for r in sel])       # weld start offset along the seam
         row = dict(cond=cond, sway_mm=sw, n=len(sel), feasible_pct=100 * fe.mean(),
-                   max_mean_mm=mx.mean(), max_p95_mm=np.percentile(mx, 95), rms_mean_mm=np.mean([r["rms_mm"] for r in sel]))
+                   max_mean_mm=mx.mean(), max_p95_mm=np.percentile(mx, 95), rms_mean_mm=np.mean([r["rms_mm"] for r in sel]),
+                   along_start_abs_mean_mm=al.mean(), along_start_abs_p95_mm=np.percentile(al, 95))
         for tol in tols:
             row[f"success_{tol}mm_pct"] = 100 * np.mean((mx <= tol) & fe)
         out.append(row)
@@ -77,6 +82,7 @@ def plots(summary, rows, thr, tols, outdir):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import FuncFormatter
     from matplotlib import font_manager
     for name in ["Noto Sans CJK KR", "AppleGothic", "Apple SD Gothic Neo", "Malgun Gothic", "NanumGothic"]:
         if any(name in f.name for f in font_manager.fontManager.ttflist):
@@ -112,6 +118,8 @@ def plots(summary, rows, thr, tols, outdir):
                    color=style[c][1], label=style[c][0], alpha=0.7)
     ax.axhline(1.0, color="k", lw=0.8, ls=":")
     ax.set_yscale("log")
+    # plain decimals (0.1, 1, 10) instead of 10^-1: Korean fonts have no U+2212 for mathtext
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
     ax.set_xlabel("서는 위치 오차 (mm)")
     ax.set_ylabel("용접선 최대 이탈 (mm, 로그)")
     ax.set_title("서는 위치 오차의 영향 (흔들림 0 mm)")
@@ -138,10 +146,14 @@ def plots(summary, rows, thr, tols, outdir):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--trials", type=int, default=300)
-    ap.add_argument("--sways", default="0,1,2,3,5")
+    ap.add_argument("--sways", default="0,0.5,1,2,3,5")
     ap.add_argument("--tols", default="0.5,1.0,1.5")
-    ap.add_argument("--fine", default="0,0.25,0.5,0.75,1,1.25,1.5,1.75,2,2.5,3",
+    ap.add_argument("--fine", default="0,0.1,0.2,0.3,0.4,0.5,0.75,1,1.5,2,3",
                     help="sway levels (mm) for the H1 threshold sweep; empty to skip")
+    ap.add_argument("--rot-ratio", type=float, default=None,
+                    help="peak base rotation per mm of peak translation (rad/mm); default from TOP Table IV, 0 = translation only")
+    ap.add_argument("--two-point-touch", action="store_true",
+                    help="skip the end-face search; position along the seam taken from the drawing")
     ap.add_argument("--fine-trials", type=int, default=200)
     ap.add_argument("--seed", type=int, default=2026)
     ap.add_argument("--jobs", type=int, default=os.cpu_count())
@@ -151,6 +163,15 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     sways = [float(s) for s in a.sways.split(",")]
     tols = [float(t) for t in a.tols.split(",")]
+    params_kw = {}
+    if a.rot_ratio is not None:
+        params_kw["sway_rot_ratio"] = a.rot_ratio
+    if a.two_point_touch:
+        params_kw["touch_end"] = False
+    P = Params(**params_kw)
+    print(f"sway_rot_ratio={P.sway_rot_ratio:.4f} rad/mm, touch_end={P.touch_end}, "
+          f"touch_approach={P.touch_approach * 1000:.0f} mm, comp noise {P.comp_noise * 1000:.2f} mm / "
+          f"{P.comp_noise_rot * 1000:.2f} mrad low-passed at {P.comp_noise_cutoff:g} Hz")
     if a.plot_only:
         def load(name):
             p = os.path.join(a.out, name)
@@ -163,11 +184,14 @@ def main():
         plots(load("summary.csv"), load("trials.csv"), load("threshold.csv"), tols, a.out)
         return
 
+    with open(os.path.join(a.out, "params.txt"), "w") as f:
+        for k, v in vars(P).items():
+            f.write(f"{k} = {v}\n")
     jobs = [("R", 0.0, i, a.seed) for i in range(a.trials)]
     for c in ["H0", "H1", "H2"]:
         jobs += [(c, s, i, a.seed) for s in sways for i in range(a.trials)]
     print(f"main study: {len(jobs)} welds")
-    rows = run_jobs(jobs, a.jobs)
+    rows = run_jobs(jobs, a.jobs, params_kw)
     write_csv(os.path.join(a.out, "trials.csv"), rows)
     summary = summarize(rows, tols)
     write_csv(os.path.join(a.out, "summary.csv"), summary)
@@ -177,7 +201,7 @@ def main():
         fine = [float(s) for s in a.fine.split(",")]
         fjobs = [("H1", s, i, a.seed + 1) for s in fine for i in range(a.fine_trials)]
         print(f"threshold sweep: {len(fjobs)} welds")
-        frows = run_jobs(fjobs, a.jobs)
+        frows = run_jobs(fjobs, a.jobs, params_kw)
         thr = summarize(frows, tols)
         write_csv(os.path.join(a.out, "threshold.csv"), thr)
 

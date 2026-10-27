@@ -17,7 +17,7 @@ import numpy as np
 import mujoco
 from PIL import Image, ImageDraw, ImageFont
 
-from sim_core import Params, Pose, Trial, WeldModel, run_trial, yaw_quat
+from sim_core import Params, Pose, Trial, WeldModel, run_trial, sway_coefs, yaw_quat
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 XML = os.path.join(HERE, "mujoco_menagerie", "unitree_g1", "weld_scene.xml")
@@ -51,11 +51,9 @@ def ffmpeg_exe():
 
 def demo_trial(wm, rng):
     """A fixed, readable example: 30 mm / 2° standing error, 5 mm / 1° part error."""
-    k = 3
-    coef = np.stack([rng.uniform(0.5, 1.0, (3, k)), rng.uniform(0.3, 2.0, (3, k)),
-                     rng.uniform(0, 2 * np.pi, (3, k))], axis=-1)
     stance = Pose(wm.nominal.pos + np.array([-0.018, 0.024, 0.0]), wm.nominal.yaw + np.deg2rad(2.0))
-    return Trial(stance, np.array([0.004, -0.003, 0.0]), np.deg2rad(1.0), coef)
+    return Trial(stance, np.array([0.004, -0.003, 0.0]), np.deg2rad(1.0),
+                 sway_coefs(rng, wm.P), sway_coefs(rng, wm.P))
 
 
 def add_sphere(scn, pos, r, rgba):
@@ -101,7 +99,7 @@ def main():
             j = min(max(i, 0), n - 1)
             b = r["base"][j]
             d.qpos[:] = wm.q_stand
-            d.qpos[0:3], d.qpos[3:7] = b.pos, yaw_quat(b.yaw)
+            d.qpos[0:3], d.qpos[3:7] = b.pos, b.quat()
             d.qpos[wm.qadr] = r["q"][j]
             mujoco.mj_kinematics(m, d)
             mujoco.mj_camlight(m, d)              # camera poses
@@ -120,7 +118,7 @@ def main():
             dr.text((24, 10), title, font=f_big, fill=(255, 255, 255))
             cur = r["devs"][j] * 1000 if i >= 0 else 0.0
             mx = r["devs"][: j + 1].max() * 1000 if i >= 0 else 0.0
-            info = (f"서는 위치 오차 30 mm · 2°   부재 오차 5 mm · 1°   몸통 흔들림 {a.sway:g} mm   |   "
+            info = (f"서는 위치 오차 30 mm · 2°   부재 오차 5 mm · 1°   몸통 흔들림 {a.sway:g} mm(+회전)   |   "
                     f"현재 이탈 {cur:5.2f} mm   최대 {mx:5.2f} mm   (초록 ≤ 1 mm, 빨강 > 1 mm, 실제 속도의 4배)")
             dr.text((26, 52), info, font=f_small, fill=(203, 213, 225))
             proc.stdin.write(np.asarray(img).tobytes())
